@@ -10,6 +10,7 @@ export interface Product {
 export interface Project {
     id: string;
     product_id: string;
+    product: Product;
     designs: Design[];
     prompt_urls: string[];
 }
