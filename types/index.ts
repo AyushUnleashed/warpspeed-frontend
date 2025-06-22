@@ -1,3 +1,4 @@
+// types/index.ts
 export interface Product {
     id: string;
     product_type: string;
@@ -9,7 +10,7 @@ export interface Product {
 export interface Project {
     id: string;
     product_id: string;
-    design_versions: string[];
+    designs: Design[];
     prompt_urls: string[];
 }
 
@@ -17,3 +18,23 @@ export interface Design {
     id: string;
     version_image_urls: string[];
 }
+
+// Chat message types for AI interface
+export interface TextMessage {
+    id: string;
+    type: 'text';
+    content: string;
+    sender: 'user' | 'ai';
+    timestamp: Date;
+}
+
+export interface ImageGridMessage {
+    id: string;
+    type: 'image-grid';
+    images: string[];
+    sender: 'ai';
+    timestamp: Date;
+    selectedImageIndex?: number;
+}
+
+export type ChatMessage = TextMessage | ImageGridMessage;

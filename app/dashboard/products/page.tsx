@@ -3,32 +3,36 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { Plus, Video, Edit, Loader2, Upload, X, AlertCircle } from "lucide-react";
+import { Plus, Video, Edit, Loader2, Upload, X, AlertCircle, Sparkles } from "lucide-react";
 import { Card, CardContent, CardFooter } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import type { Product } from "@/types";
-import { fetchProducts } from "@/utils/ProductUtils";
+import { fetchProducts, createProduct, removeBackground, createProject, generatePrompts, generateDesign } from "@/utils/api";
 import { BackendErrorCard } from "@/components/utility/ErrorCards";
 
-/**
- * Products Page Component
- * 
- * Main page that displays user's products and allows creation of new products
- * and video generation.
- */
+interface ProcessingStage {
+  stage: 'creating' | 'removing-bg' | 'generating-prompts' | 'generating-designs' | 'complete';
+  message: string;
+}
+
 export default function ProductsPage() {
   // ========== STATE MANAGEMENT ==========
   const [products, setProducts] = useState<Product[] | null>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [showCreateProductModal, setShowCreateProductModal] = useState(false);
+  const [showProcessingModal, setShowProcessingModal] = useState(false);
+  const [processingStage, setProcessingStage] = useState<ProcessingStage>({
+    stage: 'creating',
+    message: 'Creating product...'
+  });
   
   // Modal form state
   const [productType, setProductType] = useState("");
-  const [productImageUrl, setProductImageUrl] = useState("");
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [formErrors, setFormErrors] = useState<{productType?: string}>({});
+  const [formErrors, setFormErrors] = useState<{productType?: string, file?: string}>({});
+  const [isCreating, setIsCreating] = useState(false);
 
   const router = useRouter();
 
@@ -78,8 +82,8 @@ export default function ProductsPage() {
     const url = URL.createObjectURL(file);
     setPreviewUrl(url);
     
-    // Clear URL input when file is uploaded
-    setProductImageUrl("");
+    // Clear file error
+    setFormErrors(prev => ({ ...prev, file: undefined }));
   };
 
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -102,7 +106,6 @@ export default function ProductsPage() {
     setShowCreateProductModal(true);
     // Reset form state
     setProductType("");
-    setProductImageUrl("");
     setUploadedFile(null);
     setPreviewUrl(null);
     setFormErrors({});
@@ -116,19 +119,21 @@ export default function ProductsPage() {
     }
     // Reset form state
     setProductType("");
-    setProductImageUrl("");
     setUploadedFile(null);
     setPreviewUrl(null);
     setFormErrors({});
   };
 
-  const handleCreateProduct = (e: React.FormEvent) => {
+  const handleCreateProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     
     // Validate form
-    const errors: {productType?: string} = {};
+    const errors: {productType?: string, file?: string} = {};
     if (!productType.trim()) {
       errors.productType = "Product type is required";
+    }
+    if (!uploadedFile) {
+      errors.file = "Product image is required";
     }
     
     setFormErrors(errors);
@@ -136,22 +141,78 @@ export default function ProductsPage() {
     if (Object.keys(errors).length > 0) {
       return;
     }
-    
-    // TODO: Implement actual product creation logic
-    console.log("Creating product:", {
-      type: productType,
-      imageUrl: productImageUrl,
-      uploadedFile: uploadedFile
-    });
-    
-    // Close modal after creation
-    handleCloseModal();
+
+    setIsCreating(true);
+    setShowProcessingModal(true);
+    setProcessingStage({ stage: 'creating', message: 'Creating product...' });
+
+    try {
+      // Create FormData for file upload
+      const formData = new FormData();
+      formData.append('file', uploadedFile!);
+      formData.append('product_type', productType);
+
+      // Step 1: Create product
+      const newProduct = await createProduct(formData);
+      if (!newProduct) throw new Error("Failed to create product");
+
+      // Step 2: Remove background
+      setProcessingStage({ stage: 'removing-bg', message: 'Removing background...' });
+      const updatedProduct = await removeBackground(newProduct.id);
+      if (!updatedProduct) throw new Error("Failed to remove background");
+
+      // Update products list
+      setProducts(prev => prev ? [updatedProduct, ...prev] : [updatedProduct]);
+      
+      // Close modals and reset form
+      setShowCreateProductModal(false);
+      setShowProcessingModal(false);
+      handleCloseModal();
+      
+    } catch (error) {
+      console.error("Error creating product:", error);
+      setShowProcessingModal(false);
+      // Show error to user
+    } finally {
+      setIsCreating(false);
+    }
   };
 
-  const handleGenerateVideo = (productId: string) => {
-    // Call the shared function
-    // createVideoProject(productId, router);
-    console.log("Generate video for product:", productId);
+  const handleGenerateVideo = async (product: Product) => {
+    setShowProcessingModal(true);
+    setProcessingStage({ stage: 'creating', message: 'Initializing AI generation...' });
+
+    try {
+      // Step 1: Create project
+      const project = await createProject(product.id);
+      if (!project) throw new Error("Failed to create project");
+
+      // Step 2: Generate prompts
+      setProcessingStage({ stage: 'generating-prompts', message: 'Generating creative prompts...' });
+      const prompts = await generatePrompts(
+        project.id, 
+        product.product_image_bg_removed_url, 
+        product.product_type
+      );
+
+      // Step 3: Generate designs in parallel
+      setProcessingStage({ stage: 'generating-designs', message: `Generating ${prompts.length} designs...` });
+      const designPromises = prompts.map(prompt => generateDesign(project.id, prompt));
+      const designUrls = await Promise.all(designPromises);
+
+      setProcessingStage({ stage: 'complete', message: 'Generation complete! Redirecting...' });
+
+      // Navigate to chat interface with project data
+      setTimeout(() => {
+        setShowProcessingModal(false);
+        router.push(`/dashboard/ai-chat?projectId=${project.id}&images=${encodeURIComponent(JSON.stringify(designUrls))}`);
+      }, 1000);
+
+    } catch (error) {
+      console.error("Error generating AI content:", error);
+      setShowProcessingModal(false);
+      // Show error to user
+    }
   };
 
   const handleEditProduct = (productId: string) => {
@@ -172,7 +233,7 @@ export default function ProductsPage() {
       </div>
       <h2 className="text-2xl font-bold mb-2">Add a product to get started</h2>
       <p className="text-gray-600 mb-6">
-        We need product details to generate great videos for you.
+        Upload your product images and let AI create stunning photography.
       </p>
       
       <Button 
@@ -195,7 +256,7 @@ export default function ProductsPage() {
         <p className="text-center text-primary font-medium">Add New Product</p>
       </CardContent>
       <CardFooter className="text-center text-sm text-gray-500">
-        Create another product for your video content
+        Create stunning AI photography
       </CardFooter>
     </Card>
   );
@@ -217,10 +278,10 @@ export default function ProductsPage() {
       </div>
       
       <CardContent className="p-0 relative">
-        {product.thumbnail_url ? (
+        {product.product_image_bg_removed_url || product.product_image_url ? (
           <Image
-            src={product.thumbnail_url}
-            alt={product.name}
+            src={product.product_image_bg_removed_url || product.product_image_url}
+            alt={product.product_type}
             width={300}
             height={200}
             className="w-full h-48 object-cover"
@@ -234,15 +295,15 @@ export default function ProductsPage() {
       
       <CardFooter className="flex flex-col items-start pt-3 pb-4 px-4">
         <div className="w-full flex justify-between items-center mb-3">
-          <span className="font-semibold text-lg truncate">{product.name}</span>
+          <span className="font-semibold text-lg truncate">{product.product_type}</span>
         </div>
         <Button 
           variant="default" 
-          className="w-full"
-          onClick={() => handleGenerateVideo(product.id)}
+          className="w-full bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
+          onClick={() => handleGenerateVideo(product)}
         >
-          <Video className="w-4 h-4 mr-2" />
-          Start Video Generation
+          <Sparkles className="w-4 h-4 mr-2" />
+          Generate with AI
         </Button>
       </CardFooter>
     </Card>
@@ -258,11 +319,37 @@ export default function ProductsPage() {
     </div>
   );
 
+  // Processing Modal
+  const ProcessingModal = () => (
+    <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 p-4 z-50">
+      <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6">
+        <div className="text-center">
+          <div className="mb-4">
+            <Loader2 className="h-12 w-12 animate-spin text-blue-600 mx-auto" />
+          </div>
+          <h3 className="text-lg font-semibold mb-2">Processing</h3>
+          <p className="text-gray-600 mb-4">{processingStage.message}</p>
+          <div className="w-full bg-gray-200 rounded-full h-2">
+            <div 
+              className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+              style={{
+                width: processingStage.stage === 'creating' ? '25%' :
+                       processingStage.stage === 'removing-bg' ? '50%' :
+                       processingStage.stage === 'generating-prompts' ? '75%' :
+                       processingStage.stage === 'generating-designs' ? '90%' : '100%'
+              }}
+            />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   // ========== DRAG & DROP UPLOAD COMPONENT ==========
   const ImageUploadArea = () => (
     <div className="space-y-4">
       <label className="block text-sm font-medium text-gray-700">
-        Product Image
+        Product Image <span className="text-red-500">*</span>
       </label>
       
       {/* Show preview if file is uploaded */}
@@ -285,68 +372,53 @@ export default function ProductsPage() {
         </div>
       )}
       
-      {/* Drag & Drop Area or URL Input */}
+      {/* Drag & Drop Area */}
       {!previewUrl && (
-        <div className="space-y-4">
-          {/* Drag & Drop Zone */}
-          <div
-            className={`border-2 border-dashed rounded-lg p-6 transition-colors cursor-pointer ${
-              isDragOver 
-                ? 'border-blue-500 bg-blue-50' 
-                : 'border-gray-300 hover:border-gray-400'
-            }`}
-            onDragOver={onDragOver}
-            onDragLeave={onDragLeave}
-            onDrop={onDrop}
-            onClick={() => document.getElementById('file-upload')?.click()}
-          >
-            <div className="text-center">
-              <Upload className={`mx-auto h-12 w-12 ${isDragOver ? 'text-blue-500' : 'text-gray-400'}`} />
-              <div className="mt-4">
-                <p className="text-sm font-medium">
-                  {isDragOver ? 'Drop your image here' : 'Drag and drop your product image'}
-                </p>
-                <p className="text-xs text-gray-500 mt-1">
-                  or click to browse files
-                </p>
-              </div>
-              <p className="text-xs text-gray-400 mt-2">
-                PNG, JPG, JPEG up to 10MB
+        <div
+          className={`border-2 border-dashed rounded-lg p-6 transition-colors cursor-pointer ${
+            isDragOver 
+              ? 'border-blue-500 bg-blue-50' 
+              : formErrors.file 
+              ? 'border-red-500 bg-red-50'
+              : 'border-gray-300 hover:border-gray-400'
+          }`}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          onClick={() => document.getElementById('file-upload')?.click()}
+        >
+          <div className="text-center">
+            <Upload className={`mx-auto h-12 w-12 ${
+              isDragOver ? 'text-blue-500' : 
+              formErrors.file ? 'text-red-500' : 'text-gray-400'
+            }`} />
+            <div className="mt-4">
+              <p className="text-sm font-medium">
+                {isDragOver ? 'Drop your image here' : 'Drag and drop your product image'}
+              </p>
+              <p className="text-xs text-gray-500 mt-1">
+                or click to browse files
               </p>
             </div>
+            <p className="text-xs text-gray-400 mt-2">
+              PNG, JPG, JPEG up to 10MB
+            </p>
           </div>
-          
-          <input
-            id="file-upload"
-            type="file"
-            className="hidden"
-            accept="image/*"
-            onChange={handleFileInputChange}
-          />
-          
-          {/* OR Divider */}
-          <div className="relative">
-            <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-gray-300" />
-            </div>
-            <div className="relative flex justify-center text-sm">
-              <span className="px-2 bg-white text-gray-500">or</span>
-            </div>
-          </div>
-          
-          {/* URL Input */}
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
-              Product Image URL
-            </label>
-            <input
-              type="url"
-              value={productImageUrl}
-              onChange={(e) => setProductImageUrl(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="https://example.com/product-image.jpg"
-            />
-          </div>
+        </div>
+      )}
+      
+      <input
+        id="file-upload"
+        type="file"
+        className="hidden"
+        accept="image/*"
+        onChange={handleFileInputChange}
+      />
+      
+      {formErrors.file && (
+        <div className="flex items-center mt-1 text-red-600 text-sm">
+          <AlertCircle className="h-4 w-4 mr-1" />
+          {formErrors.file}
         </div>
       )}
     </div>
@@ -379,6 +451,7 @@ export default function ProductsPage() {
                   size="icon"
                   onClick={handleCloseModal}
                   className="h-8 w-8"
+                  disabled={isCreating}
                 >
                   <X className="h-4 w-4" />
                 </Button>
@@ -402,6 +475,7 @@ export default function ProductsPage() {
                     }`}
                     placeholder="e.g., Perfume, Skincare, Electronics"
                     required
+                    disabled={isCreating}
                   />
                   {formErrors.productType && (
                     <div className="flex items-center mt-1 text-red-600 text-sm">
@@ -417,13 +491,17 @@ export default function ProductsPage() {
                     type="button"
                     variant="outline" 
                     onClick={handleCloseModal}
+                    disabled={isCreating}
                   >
                     Cancel
                   </Button>
                   <Button 
                     type="submit"
                     variant="default"
+                    disabled={isCreating}
+                    className="gap-2"
                   >
+                    {isCreating && <Loader2 className="h-4 w-4 animate-spin" />}
                     Create Product
                   </Button>
                 </div>
@@ -432,6 +510,9 @@ export default function ProductsPage() {
           </div>
         </div>
       )}
+
+      {/* Processing Modal */}
+      {showProcessingModal && <ProcessingModal />}
     </div>
   );
 }
